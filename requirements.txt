@@ -13,3 +13,6 @@ pymupdf>=1.22.0
 pillow>=9.0.0
 easyocr
 tqdm
+logfire[requests]
+
+#uv environment
