@@ -10,6 +10,10 @@ from mistralai.exceptions import MistralAPIException
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document # Utilisé pour le format attendu par le splitter
 
+#/
+from .schemas import DocumentChunkSchema
+#/
+
 from .config import (
     MISTRAL_API_KEY, EMBEDDING_MODEL, EMBEDDING_BATCH_SIZE,
     FAISS_INDEX_FILE, DOCUMENT_CHUNKS_FILE, CHUNK_SIZE, CHUNK_OVERLAP
@@ -72,6 +76,11 @@ class VectorStoreManager:
                         "start_index": chunk.metadata.get("start_index", -1) # Position de début (en caractères)
                     }
                 }
+
+                #/
+                #Ajout de la vérification chunk
+                validated_chunk = DocumentChunkSchema(**chunk_dict)
+                #/
                 all_chunks.append(chunk_dict)
             doc_counter += 1
 

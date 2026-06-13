@@ -2,9 +2,18 @@
 import streamlit as st
 import os
 import logging
-from mistralai.client import MistralClient
-from mistralai.models.chat_completion import ChatMessage
-from dotenv import load_dotenv
+# from mistralai.client import MistralClient
+# from mistralai.models.chat_completion import ChatMessage
+#/
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider # <-- Le nouveau Provider
+from openai import AsyncOpenAI
+import logfire
+#/
+
+logfire.configure()
+logfire.instrument_pydantic()
 
 # --- Importations depuis vos modules ---
 try:
@@ -30,13 +39,44 @@ if not api_key:
     st.error("Erreur : Clé API Mistral non trouvée (MISTRAL_API_KEY). Veuillez la définir dans le fichier .env.")
     st.stop()
 
-try:
-    client = MistralClient(api_key=api_key)
-    logging.info("Client Mistral initialisé.")
-except Exception as e:
-    st.error(f"Erreur lors de l'initialisation du client Mistral : {e}")
-    logging.exception("Erreur initialisation client Mistral")
-    st.stop()
+# try:
+#     client = MistralClient(api_key=api_key)
+#     logging.info("Client Mistral initialisé.")
+# except Exception as e:
+#     st.error(f"Erreur lors de l'initialisation du client Mistral : {e}")
+#     logging.exception("Erreur initialisation client Mistral")
+#     st.stop()
+
+#/
+#1 On crée un client de communication qui pointe vers Mistral
+mistral_client = AsyncOpenAI(
+    base_url="https://api.mistral.ai/v1",
+    api_key=api_key
+)
+#2 On passe ce client au nouveau modèle de Pydantic AI
+mistral_model = OpenAIChatModel(
+    model, 
+    provider=OpenAIProvider(
+        base_url="https://api.mistral.ai/v1",
+        api_key=api_key
+    )
+)
+#On crée l'agent avec ses instructions
+nba_agent = Agent(
+    mistral_model,
+    system_prompt=(
+        f"Tu es 'NBA Analyst AI', un assistant expert sur la ligue de basketball {NAME}. "
+        "Ta mission est de répondre aux questions des fans en animant le débat. "
+        "Utilise UNIQUEMENT le contexte fourni ci-dessous pour répondre."
+    ),
+    retries=3 #nOMBREde tentative en cas de bug
+)
+
+#On dit à l'agent comment lire les documents found par faiss
+@nba_agent.system_prompt
+def add_context_to_prompt(ctx: RunContext[str]) -> str:
+    return f"\n\n--- CONTEXTE TROUVÉ ---\n{ctx.deps}\n---"
+#/
 
 # --- Chargement du Vector Store (mis en cache) ---
 @st.cache_resource # Garde le manager chargé en mémoire pour la session
@@ -84,36 +124,64 @@ if "messages" not in st.session_state:
     # Message d'accueil initial
     st.session_state.messages = [{"role": "assistant", "content": f"Bonjour ! Je suis votre analyste IA pour la {NAME}. Posez-moi vos questions sur les équipes, les joueurs ou les statistiques, et je vous répondrai en me basant sur les données les plus récentes."}]
 
+#/
+if "agent_history" not in st.session_state:
+    #Carnet de notes internes pour pydantic AI
+    st.session_state.agent_history = []
+#/
+
 # --- Fonctions ---
 
-def generer_reponse(prompt_messages: list[ChatMessage]) -> str:
-    """
-    Envoie le prompt (qui inclut maintenant le contexte) à l'API Mistral.
-    """
-    if not prompt_messages:
-         logging.warning("Tentative de génération de réponse avec un prompt vide.")
-         return "Je ne peux pas traiter une demande vide."
-    try:
-        logging.info(f"Appel à l'API Mistral modèle '{model}' avec {len(prompt_messages)} message(s).")
-        # Log le contenu du prompt (peut être long) - commenter si trop verbeux
-        # logging.debug(f"Prompt envoyé à l'API: {prompt_messages}")
+# def generer_reponse(prompt_messages: list[ChatMessage]) -> str:
+#     """
+#     Envoie le prompt (qui inclut maintenant le contexte) à l'API Mistral.
+#     """
+#     if not prompt_messages:
+#          logging.warning("Tentative de génération de réponse avec un prompt vide.")
+#          return "Je ne peux pas traiter une demande vide."
+#     try:
+#         logging.info(f"Appel à l'API Mistral modèle '{model}' avec {len(prompt_messages)} message(s).")
+#         # Log le contenu du prompt (peut être long) - commenter si trop verbeux
+#         # logging.debug(f"Prompt envoyé à l'API: {prompt_messages}")
 
-        response = client.chat(
-            model=model,
-            messages=prompt_messages,
-            temperature=0.1, # Température basse pour des réponses factuelles basées sur le contexte
-            # top_p=0.9,
+#         response = client.chat(
+#             model=model,
+#             messages=prompt_messages,
+#             temperature=0.1, # Température basse pour des réponses factuelles basées sur le contexte
+#             # top_p=0.9,
+#         )
+#         if response.choices and len(response.choices) > 0:
+#             logging.info("Réponse reçue de l'API Mistral.")
+#             return response.choices[0].message.content
+#         else:
+#             logging.warning("L'API n'a pas retourné de choix valide.")
+#             return "Désolé, je n'ai pas pu générer de réponse valide pour le moment."
+#     except Exception as e:
+#         st.error(f"Erreur lors de l'appel à l'API Mistral: {e}")
+#         logging.exception("Erreur API Mistral pendant client.chat")
+#         return "Je suis désolé, une erreur technique m'empêche de répondre. Veuillez réessayer plus tard."
+
+
+def generer_reponse(prompt: str, context_str: str, history: list):
+    """
+        Génère la réponse avec Pydantic AI en utilisant le context RAG et l'historique.
+    """
+    try:
+        logging.info(f"Appel à l'Agent Pydantic AI avec {len(history)} messages en mémoire.")
+
+        #On exécute l'agent en lui passant ses 3 éléments indispensables
+        result = nba_agent.run_sync(
+            prompt,
+            deps=context_str,
+            message_history=history
         )
-        if response.choices and len(response.choices) > 0:
-            logging.info("Réponse reçue de l'API Mistral.")
-            return response.choices[0].message.content
-        else:
-            logging.warning("L'API n'a pas retourné de choix valide.")
-            return "Désolé, je n'ai pas pu générer de réponse valide pour le moment."
+        return result.output, result.all_messages()
+
     except Exception as e:
-        st.error(f"Erreur lors de l'appel à l'API Mistral: {e}")
-        logging.exception("Erreur API Mistral pendant client.chat")
-        return "Je suis désolé, une erreur technique m'empêche de répondre. Veuillez réessayer plus tard."
+        st.error(f"Erreur lors de l'appel à l'agent pydantic AI: {e}")
+        logging.exception("Erreur API Agent")
+        #En cas de crash on rend l'ancien histortique intact pour ne pas casser la mémoire
+        return "Je suis désolé, une erreur technique m'empêche de répondre.", history
 
 # --- Interface Utilisateur Streamlit ---
 st.title(APP_TITLE)
@@ -164,10 +232,10 @@ if prompt := st.chat_input(f"Posez votre question sur la {NAME}..."):
     final_prompt_for_llm = SYSTEM_PROMPT.format(context_str=context_str, question=prompt)
 
     # Créer la liste de messages pour l'API (juste le prompt système/utilisateur combiné)
-    messages_for_api = [
-        # On pourrait séparer system et user, mais Mistral gère bien un long message user structuré
-        ChatMessage(role="user", content=final_prompt_for_llm)
-    ]
+    # messages_for_api = [
+    #     # On pourrait séparer system et user, mais Mistral gère bien un long message user structuré
+    #     ChatMessage(role="user", content=final_prompt_for_llm)
+    # ]
 
     # === Fin de la logique RAG ===
 
@@ -178,7 +246,15 @@ if prompt := st.chat_input(f"Posez votre question sur la {NAME}..."):
         message_placeholder.text("...") # Indicateur simple
 
         # Génération de la réponse de l'assistant en utilisant le prompt augmenté
-        response_content = generer_reponse(messages_for_api)
+        # response_content = generer_reponse(messages_for_api)
+
+        #On donne la question le context et la mémoire
+        #On récupère le text et l'et la mémoire mise à jour
+        response_content, st.session_state.agent_history = generer_reponse(
+            prompt, 
+            context_str, 
+            st.session_state.agent_history
+        )
 
         # Affichage de la réponse complète
         message_placeholder.write(response_content)
