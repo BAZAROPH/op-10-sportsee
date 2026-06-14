@@ -17,7 +17,6 @@ class PlayerSchema(BaseModel):
     team: str #Équipe actuelle
     position: Optional[str] = "Inconnu" #Poste du joueur
 
-
 class MatchSchema(BaseModel):
     match_id: int #Identifiant unique du match
     date: str #Date de la rencontre
