@@ -10,6 +10,7 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider # <-- Le nouveau Provider
 from openai import AsyncOpenAI
 import logfire
+from sql_tool import interroger_base_sql
 #/
 
 logfire.configure()
@@ -47,7 +48,7 @@ if not api_key:
 #     logging.exception("Erreur initialisation client Mistral")
 #     st.stop()
 
-#/
+#//
 #1 On crée un client de communication qui pointe vers Mistral
 mistral_client = AsyncOpenAI(
     base_url="https://api.mistral.ai/v1",
@@ -76,6 +77,23 @@ nba_agent = Agent(
 @nba_agent.system_prompt
 def add_context_to_prompt(ctx: RunContext[str]) -> str:
     return f"\n\n--- CONTEXTE TROUVÉ ---\n{ctx.deps}\n---"
+
+#TOOL : ACCÈS À LA BASE DE DONNÉES SQL
+@nba_agent.tool
+def recherche_statistiques_sql(ctx: RunContext[str], requete_utilisateur: str) -> str:
+    """
+    Outil à utiliser OBLIGATOIREMENT pour répondre aux questions nécessitant :
+    - Des statistiques de joueurs (points, rebonds, passes, minutes, etc.)
+    - Des comparaisons chiffrées entre joueurs ou équipes
+    - Des classements (ex: "le top 5", "le meilleur")
+    - Tout calcul mathématique sur la saison NBA.
+    """
+    logging.info(f"L'Agent délègue au Tool SQL LangChain la requête : {requete_utilisateur}")
+    
+    #On passe la question à notre script sql_tool.py
+    resultat = interroger_base_sql(requete_utilisateur)
+    
+    return resultat
 #/
 
 # --- Chargement du Vector Store (mis en cache) ---
