@@ -1,4 +1,14 @@
 import os
+# Contournement d'un problème de latence réseau (Happy Eyeballs / IPv6 mal configuré) :
+# Par défaut, Python tente de se connecter en IPv6 aux API externes (comme api.mistral.ai).
+# Si le réseau local supporte mal l'IPv6, cela provoque un blocage (hang) de 10 secondes par requête.
+# Ce patch surcharge la résolution DNS pour forcer l'utilisation de l'IPv4, rendant les appels instantanés.
+import socket
+orig_getaddrinfo = socket.getaddrinfo
+def ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    return orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = ipv4_only_getaddrinfo
+
 from dotenv import load_dotenv
 from langchain_community.utilities import SQLDatabase
 from langchain_openai import ChatOpenAI
@@ -52,7 +62,7 @@ prompt = PromptTemplate.from_template(template_personnalise)
 generate_query = create_sql_query_chain(llm, db, prompt)
 execute_query = QuerySQLDataBaseTool(db=db)
 
-def interroger_base_sql(question: str) -> str:
+def interroger_base_sql(question: str) -> dict:
     """
         Génère dynamiquement la requête SQL, l'exécute sur SQLite et retourne le résultat brut.
     """
@@ -68,10 +78,20 @@ def interroger_base_sql(question: str) -> str:
         resultat_brut = execute_query.invoke(requete_sql)
         
         #On retourne le résultat (généralement sous forme de liste de tuples)
-        return f"Données brutes extraites de la base : {resultat_brut}"
+        #return f"Données brutes extraites de la base : {resultat_brut}"
+
+        #On retourne un dictionnaire contenant la requête et le résultat
+        return {
+            "requete": requete_sql,
+            "resultat": f"Données brutes extraites de la base: {resultat_brut}"
+        }
         
     except Exception as e:
-        return f"Erreur lors de l'exécution du Tool SQL : {e}"
+        #return f"Erreur lors de l'exécution du Tool SQL : {e}"
+        return {
+            "requete": "Erreur de génération SQL",
+            "resultat": f"Erreur lors de l'exécution du Tool SQL : {e}"
+        }
     
 # TEST INDÉPENDANT DU SCRIPT
 if __name__ == "__main__":

@@ -1,4 +1,14 @@
 # indexer.py
+# Contournement d'un problème de latence réseau (Happy Eyeballs / IPv6 mal configuré) :
+# Par défaut, Python tente de se connecter en IPv6 aux API externes (comme api.mistral.ai).
+# Si le réseau local supporte mal l'IPv6, cela provoque un blocage (hang) de 10 secondes par requête.
+# Ce patch surcharge la résolution DNS pour forcer l'utilisation de l'IPv4, rendant les appels instantanés.
+import socket
+orig_getaddrinfo = socket.getaddrinfo
+def ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    return orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = ipv4_only_getaddrinfo
+
 import argparse
 import logging
 from typing import Optional

@@ -1,135 +1,125 @@
-# Assistant RAG avec Mistral
+# Assistant RAG Hybride avec Mistral (NBA Analyst AI)
 
-Ce projet implémente un assistant virtuel basé sur le modèle Mistral, utilisant la technique de Retrieval-Augmented Generation (RAG) pour fournir des réponses précises et contextuelles à partir d'une base de connaissances personnalisée.
+Ce projet implémente un assistant virtuel expert de la NBA (**NBA Analyst AI**) utilisant une architecture de **Retrieval-Augmented Generation (RAG) Hybride** basée sur les modèles Mistral. Il combine la recherche sémantique vectorielle (sur des documents non structurés) et le requêtage de base de données relationnelle (sur des statistiques structurées) pour fournir des réponses ultra-précises et contextualisées.
+
+> [!NOTE]
+> Pour une explication très détaillée de l'architecture interne, du fonctionnement du pipeline hybride et de l'évaluation scientifique des performances, consultez la [Documentation de la Méthodologie RAG (README_RAG.md)](./README_RAG.md).
+
+---
 
 ## Fonctionnalités
 
-- 🔍 **Recherche sémantique** avec FAISS pour trouver les documents pertinents
-- 🤖 **Génération de réponses** avec les modèles Mistral (Small ou Large)
-- ⚙️ **Paramètres personnalisables** (modèle, nombre de documents, score minimum)
+- 🔍 **Recherche sémantique vectorielle** : Recherche par similarité cosinus avec FAISS dans les archives textuelles (PDFs de discussions Reddit) en utilisant le modèle `mistral-embed`.
+- 📊 **Requêtage SQL Relationnel dynamique** : Génération et exécution de requêtes SQL SQLite via LangChain à partir des questions de l'utilisateur pour extraire les statistiques exactes des joueurs.
+- 🤖 **Orchestration d'Agent Intelligent** : Agent orchestrateur basé sur le framework **Pydantic AI** (utilisant `mistral-small-latest`) qui choisit dynamiquement et séquentiellement d'interroger les documents (FAISS) ou la base de données (SQL).
+- 👁️ **Fallback OCR automatique** : Extraction robuste des documents PDF avec basculement automatique sur un moteur OCR (**PyMuPDF + EasyOCR**) si les documents sont des scans.
+- 📈 **Évaluation de performances Ragas & Logfire** : Évaluation intégrée du RAG avec des métriques standardisées de précision, rappel et fidélité de réponse, instrumentée avec Logfire.
 
-## Prérequis
+---
 
-- Python 3.9+ 
-- Clé API Mistral (obtenue sur [console.mistral.ai](https://console.mistral.ai/))
-
-## Installation
-
-1. **Cloner le dépôt**
-
-```bash
-git clone <url-du-repo>
-cd <nom-du-repo>
-```
-
-2. **Créer un environnement virtuel**
-
-```bash
-# Création de l'environnement virtuel
-python -m venv venv
-
-# Activation de l'environnement virtuel
-# Sur Windows
-venv\Scripts\activate
-# Sur macOS/Linux
-source venv/bin/activate
-```
-
-3. **Installer les dépendances**
-
-```bash
-pip install -r requirements.txt
-```
-
-4. **Configurer la clé API**
-
-Créez un fichier `.env` à la racine du projet avec le contenu suivant :
-
-```
-MISTRAL_API_KEY=votre_clé_api_mistral
-```
-
-## Structure du projet
+## 📂 Structure du Projet
 
 ```
 .
-├── MistralChat.py          # Application Streamlit principale
-├── indexer.py              # Script pour indexer les documents
-├── inputs/                 # Dossier pour les documents sources
-├── vector_db/              # Dossier pour l'index FAISS et les chunks
-├── database/               # Base de données SQLite pour les interactions
-└── utils/                  # Modules utilitaires
-    ├── config.py           # Configuration de l'application
-    ├── database.py         # Gestion de la base de données
-    └── vector_store.py     # Gestion de l'index vectoriel
-
+├── MistralChat.py           # Application Streamlit principale (UI & Agent Pydantic AI)
+├── load_excel_to_db.py      # Validation Pydantic et importation du Excel regular NBA dans SQLite
+├── indexer.py               # Extraction et indexation vectorielle des PDF dans FAISS
+├── sql_tool.py              # Traducteur LangChain Langage Naturel -> Requête SQL SQLite
+├── evaluate_ragas.py        # Évaluation automatique du système RAG avec Ragas et Logfire
+├── compare_eval.py          # Comparatif et génération du graphique de performances (Avant vs Après SQL)
+├── inputs/                  # Répertoire des sources (Fichiers PDF Reddit et regular NBA.xlsx)
+├── vector_db/               # Index vectoriel FAISS et chunks persistés (pickle)
+├── nba_data.db              # Base de données relationnelle SQLite contenant les statistiques NBA
+├── requirements.txt         # Fichier des dépendances Python
+├── utils/                   # Modules utilitaires partagés
+│   ├── config.py            # Configuration globale de l'application (modèles, chunk_size, etc.)
+│   ├── data_loader.py       # Chargement, parsing de fichiers et pipeline OCR
+│   ├── schemas.py           # Schémas de validation des chunks de documents
+│   └── vector_store.py      # Gestionnaire d'index vectoriel FAISS et appels embeddings
+└── README_RAG.md            # Méthodologie et analyse comparative du RAG
 ```
 
-## Utilisation
+---
 
-### 1. Ajouter des documents
+## 🛠️ Prérequis
 
-Placez vos documents dans le dossier `inputs/`. Les formats supportés sont :
-- PDF
-- TXT
-- DOCX
-- CSV
-- JSON
+- Python 3.9+
+- Clé API Mistral (à obtenir sur [console.mistral.ai](https://console.mistral.ai/))
 
-Vous pouvez organiser vos documents dans des sous-dossiers pour une meilleure organisation.
+---
 
-### 2. Indexer les documents
+## 📦 Installation
 
-Exécutez le script d'indexation pour traiter les documents et créer l'index FAISS :
+1. **Cloner le dépôt**
+   ```bash
+   git clone git@github.com:BAZAROPH/op-10-sportsee.git
+   cd op-10-sportsee
+   ```
+
+2. **Créer un environnement virtuel**
+   ```bash
+   # Création
+   python -m venv .venv
+
+   # Activation
+   # Sur Windows
+   .venv\Scripts\activate
+   # Sur macOS/Linux
+   source .venv/bin/activate
+   ```
+
+3. **Installer les dépendances**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Configurer les variables d'environnement**
+   Créez un fichier `.env` à la racine du projet avec vos accès :
+   ```env
+   MISTRAL_API_KEY=votre_cle_api_mistral
+   ```
+
+---
+
+## 📖 Utilisation
+
+### 1. Ingestion et initialisation des données
+
+Pour initialiser le système complet, exécutez séquentiellement ces deux scripts :
 
 ```bash
+# Étape A : Valider et charger le fichier Excel des statistiques dans SQLite
+python load_excel_to_db.py
+
+# Étape B : Extraire, découper et indexer les PDFs dans la base vectorielle FAISS
 python indexer.py
 ```
 
-Ce script va :
-1. Charger les documents depuis le dossier `inputs/`
-2. Découper les documents en chunks
-3. Générer des embeddings avec Mistral
-4. Créer un index FAISS pour la recherche sémantique
-5. Sauvegarder l'index et les chunks dans le dossier `vector_db/`
-
-### 3. Lancer l'application
+### 2. Lancer l'application web Streamlit
 
 ```bash
 streamlit run MistralChat.py
 ```
+L'application s'ouvre automatiquement dans votre navigateur à l'adresse `http://localhost:8501`. 
+L'interface vous permet de converser avec **NBA Analyst AI** et de voir, grâce à des volets dépliants (expanders), quelles requêtes SQL ou recherches FAISS ont été exécutées en arrière-plan.
 
-L'application sera accessible à l'adresse http://localhost:8501 dans votre navigateur.
+### 3. Lancer l'évaluation Ragas et visualiser les gains de performance
 
+Vous pouvez évaluer la qualité des réponses et générer les courbes de comparaison :
+```bash
+# Génère les rapports d'évaluation Ragas au format CSV
+python evaluate_ragas.py
 
-## Modules principaux
+# Génère le graphique comparatif avant/après intégration SQL
+python compare_eval.py
+```
+Le graphique sera exporté sous le nom `comparatif_metrics_ragas.png`.
 
-### `utils/vector_store.py`
+---
 
-Gère l'index vectoriel FAISS et la recherche sémantique :
-- Chargement et découpage des documents
-- Génération des embeddings avec Mistral
-- Création et interrogation de l'index FAISS
+## ⚙️ Personnalisation
 
-### `utils/query_classifier.py`
-
-Détermine si une requête nécessite une recherche RAG :
-- Analyse des mots-clés
-- Classification avec le modèle Mistral
-- Détection des questions spécifiques vs générales
-
-### `utils/database.py`
-
-Gère la base de données SQLite pour les interactions :
-- Enregistrement des questions et réponses
-- Stockage des feedbacks utilisateurs
-- Récupération des statistiques
-
-## Personnalisation
-
-Vous pouvez personnaliser l'application en modifiant les paramètres dans `utils/config.py` :
-- Modèles Mistral utilisés
-- Taille des chunks et chevauchement
-- Nombre de documents par défaut
-- Nom de la commune ou organisation
-
+La configuration de l'application est centralisée dans le fichier [utils/config.py](./utils/config.py) :
+- **Taille & Chevauchement des Chunks** : Ajustez `CHUNK_SIZE` et `CHUNK_OVERLAP` pour modifier le comportement de découpage textuel.
+- **Modèles utilisés** : Remplacez `MODEL_NAME` (par défaut `mistral-small-latest`) ou `EMBEDDING_MODEL` (`mistral-embed`).
+- **Nombre de documents retournés** : Modifiez `SEARCH_K` pour contrôler le nombre de chunks FAISS à injecter dans le contexte initial.

@@ -1,14 +1,22 @@
-# MistralChat.py (version RAG)
+# MistralChat.py
+# Contournement d'un problème de latence réseau (Happy Eyeballs / IPv6 mal configuré) :
+# Par défaut, Python tente de se connecter en IPv6 aux API externes (comme api.mistral.ai).
+# Si le réseau local supporte mal l'IPv6, cela provoque un blocage (hang) de 10 secondes par requête.
+# Ce patch surcharge la résolution DNS pour forcer l'utilisation de l'IPv4, rendant les appels instantanés.
+import socket
+orig_getaddrinfo = socket.getaddrinfo
+def ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    return orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = ipv4_only_getaddrinfo
+
 import streamlit as st
 import os
 import logging
-# from mistralai.client import MistralClient
-# from mistralai.models.chat_completion import ChatMessage
-#/
+from typing import Any
+##/
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.openai import OpenAIProvider # <-- Le nouveau Provider
-from openai import AsyncOpenAI
+from pydantic_ai.providers.openai import OpenAIProvider
 import logfire
 from sql_tool import interroger_base_sql
 #/
@@ -16,7 +24,7 @@ from sql_tool import interroger_base_sql
 logfire.configure()
 logfire.instrument_pydantic()
 
-# --- Importations depuis vos modules ---
+# --- Configuration et imports des constantes applicatives ---
 try:
     from utils.config import (
         MISTRAL_API_KEY, MODEL_NAME, SEARCH_K,
@@ -28,11 +36,10 @@ except ImportError as e:
     st.stop()
 
 
-# --- Configuration du Logging ---
-# Note: Streamlit peut avoir sa propre gestion de logs. Configurer ici est une bonne pratique.
+# --- Initialisation du logger système ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(message)s')
 
-# --- Configuration de l'API Mistral ---
+# --- Validation des variables d'environnement ---
 api_key = MISTRAL_API_KEY
 model = MODEL_NAME
 
@@ -40,21 +47,8 @@ if not api_key:
     st.error("Erreur : Clé API Mistral non trouvée (MISTRAL_API_KEY). Veuillez la définir dans le fichier .env.")
     st.stop()
 
-# try:
-#     client = MistralClient(api_key=api_key)
-#     logging.info("Client Mistral initialisé.")
-# except Exception as e:
-#     st.error(f"Erreur lors de l'initialisation du client Mistral : {e}")
-#     logging.exception("Erreur initialisation client Mistral")
-#     st.stop()
-
-#//
-#1 On crée un client de communication qui pointe vers Mistral
-mistral_client = AsyncOpenAI(
-    base_url="https://api.mistral.ai/v1",
-    api_key=api_key
-)
-#2 On passe ce client au nouveau modèle de Pydantic AI
+##/
+#Initialisation du client de communication avec l'infrastructure Mistral
 mistral_model = OpenAIChatModel(
     model, 
     provider=OpenAIProvider(
@@ -62,7 +56,7 @@ mistral_model = OpenAIChatModel(
         api_key=api_key
     )
 )
-#On crée l'agent avec ses instructions
+#Définition du gestionnaire principal et de ses directives métier
 nba_agent = Agent(
     mistral_model,
     system_prompt=(
@@ -70,60 +64,93 @@ nba_agent = Agent(
         "Ta mission est de répondre aux questions des fans en animant le débat. "
         "Utilise UNIQUEMENT le contexte fourni ci-dessous pour répondre."
     ),
-    retries=3 #nOMBREde tentative en cas de bug
+    retries=3 # Nombre de tentatives d'exécution en cas d'erreur de parsing
 )
 
-#On dit à l'agent comment lire les documents found par faiss
+#Injection dynamique du contexte de recherche dans la session courante
 @nba_agent.system_prompt
-def add_context_to_prompt(ctx: RunContext[str]) -> str:
-    return f"\n\n--- CONTEXTE TROUVÉ ---\n{ctx.deps}\n---"
+def add_context_to_prompt(ctx: RunContext[dict]) -> str:
+    return f"""\n\n--- CONTEXTE TROUVÉ ---\n{ctx.deps['context_str']}\n---
+            Tu peux tout à fait utiliser tes différents outils séquentiellement pour une même question. 
+            Si l'utilisateur demande des statistiques précises ET un contexte historique, appelle l'outil SQL puis l'outil FAISS avant de rédiger ta réponse finale.
+            """
 
-#TOOL : ACCÈS À LA BASE DE DONNÉES SQL
+#Module d'extraction vectorielle (Index FAISS)
 @nba_agent.tool
-def recherche_statistiques_sql(ctx: RunContext[str], requete_utilisateur: str) -> str:
+def recherche_documentaire_faiss(ctx: RunContext[Any], question_recherche: str) -> str:
     """
-    Outil à utiliser OBLIGATOIREMENT pour répondre aux questions nécessitant :
-    - Des statistiques de joueurs (points, rebonds, passes, minutes, etc.)
-    - Des comparaisons chiffrées entre joueurs ou équipes
-    - Des classements (ex: "le top 5", "le meilleur")
-    - Tout calcul mathématique sur la saison NBA.
+        Recherche par similarité sémantique au sein des archives non structurées (PDF).
+    """
+    logging.info(f"L'agent utilise l'outils FAISS pour : {question_recherche}")
+
+    # Indique qu'on a appelé FAISS dans les dépendances (évite l'accès direct à st.session_state dans un thread séparé)
+    if isinstance(ctx.deps, dict):
+        ctx.deps["faiss_called"] = True
+
+    # Récupération du VectorStoreManager
+    if isinstance(ctx.deps, dict) and "vector_store_manager" in ctx.deps:
+        manager = ctx.deps["vector_store_manager"]
+    else:
+        manager = ctx.deps
+
+    if manager is None:
+        return "Erreur: la base de documents n'est pas disponible."
+    
+    try:
+        search_results = manager.search(question_recherche, k=SEARCH_K)
+        if not search_results:
+            return "Aucune information trouvée dans les documents pour cette question."
+        context_str = "\n\n".join([f"Source Document: {res['text']}" for res in search_results])
+
+        return f"Voici ce que disent les documents :\n{context_str}"
+    
+    except Exception as e:
+        return f"Erreur lors de la recherche dans les documents : {e}"
+
+#Module d'extraction relationnelle (Base SQL)
+@nba_agent.tool
+def recherche_statistiques_sql(ctx: RunContext[dict], requete_utilisateur: str) -> str:
+    """
+    Interroge la base de données SQL pour récupérer des statistiques précises sur les joueurs (points, passes, rebonds, minutes).
+    Le paramètre 'requete_utilisateur' doit être une question en langage naturel (ex: 'Combien de points a marqué Shai Gilgeous-Alexander ?').
     """
     logging.info(f"L'Agent délègue au Tool SQL LangChain la requête : {requete_utilisateur}")
     
-    #On passe la question à notre script sql_tool.py
-    resultat = interroger_base_sql(requete_utilisateur)
-    
-    return resultat
+    reponse_outil = interroger_base_sql(requete_utilisateur) 
+
+    #On écrit la requête dans les dépendances pour l'UI, et le résultat pour RAGAS
+    if isinstance(reponse_outil, dict):
+        ctx.deps["sql_queries"].append(reponse_outil.get("requete", "Requête non affichable"))
+        
+        #On sauvegarde la donnée brute si le capteur existe
+        if "sql_results" in ctx.deps:
+            ctx.deps["sql_results"].append(reponse_outil.get("resultat", ""))
+            
+        return reponse_outil.get("resultat", "")
+    else:
+        ctx.deps["sql_queries"].append(str(reponse_outil))
+        if "sql_results" in ctx.deps:
+            ctx.deps["sql_results"].append(str(reponse_outil))
+        return str(reponse_outil)
 #/
 
-# --- Chargement du Vector Store (mis en cache) ---
-@st.cache_resource # Garde le manager chargé en mémoire pour la session
+# --- Persistance et mise en cache de la structure vectorielle ---
+@st.cache_resource
 def get_vector_store_manager():
     logging.info("Tentative de chargement du VectorStoreManager...")
     try:
         manager = VectorStoreManager()
-        # Vérifie si l'index a bien été chargé par le constructeur
         if manager.index is None or not manager.document_chunks:
             st.error("L'index vectoriel ou les chunks n'ont pas pu être chargés.")
-            st.warning("Assurez-vous d'avoir exécuté 'python indexer.py' après avoir placé vos fichiers dans le dossier 'inputs'.")
-            logging.error("Index Faiss ou chunks non trouvés/chargés par VectorStoreManager.")
-            return None # Retourne None si échec
-        logging.info(f"VectorStoreManager chargé avec succès ({manager.index.ntotal} vecteurs).")
+            return None
         return manager
-    except FileNotFoundError:
-         st.error("Fichiers d'index ou de chunks non trouvés.")
-         st.warning("Veuillez exécuter 'python indexer.py' pour créer la base de connaissances.")
-         logging.error("FileNotFoundError lors de l'init de VectorStoreManager.")
-         return None
     except Exception as e:
-        st.error(f"Erreur inattendue lors du chargement du VectorStoreManager: {e}")
-        logging.exception("Erreur chargement VectorStoreManager")
+        st.error(f"Erreur inattendue lors du chargement: {e}")
         return None
 
 vector_store_manager = get_vector_store_manager()
 
-# --- Prompt Système pour RAG ---
-# Adaptez ce prompt selon vos besoins
+# --- Modèle de prompt structurel ---
 SYSTEM_PROMPT = f"""Tu es 'NBA Analyst AI', un assistant expert sur la ligue de basketball NBA.
 Ta mission est de répondre aux questions des fans en animant le débat.
 
@@ -137,60 +164,31 @@ QUESTION DU FAN:
 RÉPONSE DE L'ANALYSTE NBA:"""
 
 
-# --- Initialisation de l'historique de conversation ---
+# --- Instanciation et vérification des états de session Streamlit ---
 if "messages" not in st.session_state:
-    # Message d'accueil initial
     st.session_state.messages = [{"role": "assistant", "content": f"Bonjour ! Je suis votre analyste IA pour la {NAME}. Posez-moi vos questions sur les équipes, les joueurs ou les statistiques, et je vous répondrai en me basant sur les données les plus récentes."}]
 
 #/
 if "agent_history" not in st.session_state:
-    #Carnet de notes internes pour pydantic AI
+    #Structure de stockage de l'historique 
     st.session_state.agent_history = []
 #/
 
-# --- Fonctions ---
-
-# def generer_reponse(prompt_messages: list[ChatMessage]) -> str:
-#     """
-#     Envoie le prompt (qui inclut maintenant le contexte) à l'API Mistral.
-#     """
-#     if not prompt_messages:
-#          logging.warning("Tentative de génération de réponse avec un prompt vide.")
-#          return "Je ne peux pas traiter une demande vide."
-#     try:
-#         logging.info(f"Appel à l'API Mistral modèle '{model}' avec {len(prompt_messages)} message(s).")
-#         # Log le contenu du prompt (peut être long) - commenter si trop verbeux
-#         # logging.debug(f"Prompt envoyé à l'API: {prompt_messages}")
-
-#         response = client.chat(
-#             model=model,
-#             messages=prompt_messages,
-#             temperature=0.1, # Température basse pour des réponses factuelles basées sur le contexte
-#             # top_p=0.9,
-#         )
-#         if response.choices and len(response.choices) > 0:
-#             logging.info("Réponse reçue de l'API Mistral.")
-#             return response.choices[0].message.content
-#         else:
-#             logging.warning("L'API n'a pas retourné de choix valide.")
-#             return "Désolé, je n'ai pas pu générer de réponse valide pour le moment."
-#     except Exception as e:
-#         st.error(f"Erreur lors de l'appel à l'API Mistral: {e}")
-#         logging.exception("Erreur API Mistral pendant client.chat")
-#         return "Je suis désolé, une erreur technique m'empêche de répondre. Veuillez réessayer plus tard."
+#Structure de tracking pour l'affichage conditionnel des pipelines d'extraction
+if "sources_en_cours" not in st.session_state:
+    st.session_state.sources_en_cours = {"faiss": False, "sql": []}
 
 
-def generer_reponse(prompt: str, context_str: str, history: list):
+def generer_reponse(prompt: str, deps_dict: dict, history: list):
     """
-        Génère la réponse avec Pydantic AI en utilisant le context RAG et l'historique.
+    Exécute le cycle d'interrogation synchrone avec injection du dictionnaire de dépendances.
     """
     try:
         logging.info(f"Appel à l'Agent Pydantic AI avec {len(history)} messages en mémoire.")
 
-        #On exécute l'agent en lui passant ses 3 éléments indispensables
         result = nba_agent.run_sync(
             prompt,
-            deps=context_str,
+            deps=deps_dict,
             message_history=history
         )
         return result.output, result.all_messages()
@@ -198,45 +196,58 @@ def generer_reponse(prompt: str, context_str: str, history: list):
     except Exception as e:
         st.error(f"Erreur lors de l'appel à l'agent pydantic AI: {e}")
         logging.exception("Erreur API Agent")
-        #En cas de crash on rend l'ancien histortique intact pour ne pas casser la mémoire
+        # Rétablissement séquentiel de l'historique en cas d'échec de la transaction
         return "Je suis désolé, une erreur technique m'empêche de répondre.", history
 
-# --- Interface Utilisateur Streamlit ---
+# --- Construction de la couche de présentation (UI Streamlit) ---
 st.title(APP_TITLE)
 st.caption(f"Assistant virtuel pour {NAME} | Modèle: {model}")
 
-# Affichage des messages de l'historique (pour l'UI)
+#Rendu de l'historique des échanges de la session
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
+        
+        #Hydratation conditionnelle de l'arborescence des composants sources
+        if message["role"] == "assistant" and "sources" in message:
+            sources = message["sources"]
+            if sources.get("faiss") or len(sources.get("sql", [])) > 0:
+                with st.expander("🔍 Voir les sources et requêtes en arrière-plan"):
+                    if sources.get("faiss"):
+                        st.info("📚 Recherche documentaire effectuée dans l'index FAISS (PDFs).")
+                    for sql_query in sources.get("sql", []):
+                        st.success("💾 Recherche dans la base de données (SQL) effectuée.")
+                        st.code(sql_query, language="sql")
 
-# Zone de saisie utilisateur
+#Logique de capture et traitement du flux d'entrée utilisateur
 if prompt := st.chat_input(f"Posez votre question sur la {NAME}..."):
-    # 1. Ajouter et afficher le message de l'utilisateur
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.write(prompt)
 
-    # === Début de la logique RAG ===
+    #Réinitialisation du dictionnaire d'état pour la nouvelle transaction
+    st.session_state.sources_en_cours = {"faiss": False, "sql": []}
 
-    # 2. Vérifier si le Vector Store est disponible
+    #Pipeline RAG d'extraction vectorielle amont
     if vector_store_manager is None:
         st.error("Le service de recherche de connaissances n'est pas disponible. Impossible de traiter votre demande.")
         logging.error("VectorStoreManager non disponible pour la recherche.")
-        # On arrête ici car on ne peut pas faire de RAG
         st.stop()
 
-    # 3. Rechercher le contexte dans le Vector Store
     try:
         logging.info(f"Recherche de contexte pour la question: '{prompt}' avec k={SEARCH_K}")
         search_results = vector_store_manager.search(prompt, k=SEARCH_K)
         logging.info(f"{len(search_results)} chunks trouvés dans le Vector Store.")
+        
+        if search_results:
+            st.session_state.sources_en_cours["faiss"] = True
+            
     except Exception as e:
         st.error(f"Une erreur est survenue lors de la recherche d'informations pertinentes: {e}")
         logging.exception(f"Erreur pendant vector_store_manager.search pour la query: {prompt}")
-        search_results = [] # On continue sans contexte si la recherche échoue
+        search_results = []
 
-    # 4. Formater le contexte pour le prompt LLM
+    # Formatage de la charge utile contextuelle textuelle
     context_str = "\n\n---\n\n".join([
         f"Source: {res['metadata'].get('source', 'Inconnue')} (Score: {res['score']:.1f}%)\nContenu: {res['text']}"
         for res in search_results
@@ -246,40 +257,48 @@ if prompt := st.chat_input(f"Posez votre question sur la {NAME}..."):
         context_str = "Aucune information pertinente trouvée dans la base de connaissances pour cette question."
         logging.warning(f"Aucun contexte trouvé pour la query: {prompt}")
 
-    # 5. Construire le prompt final pour l'API Mistral en utilisant le System Prompt RAG
-    final_prompt_for_llm = SYSTEM_PROMPT.format(context_str=context_str, question=prompt)
-
-    # Créer la liste de messages pour l'API (juste le prompt système/utilisateur combiné)
-    # messages_for_api = [
-    #     # On pourrait séparer system et user, mais Mistral gère bien un long message user structuré
-    #     ChatMessage(role="user", content=final_prompt_for_llm)
-    # ]
-
-    # === Fin de la logique RAG ===
-
-
-    # 6. Afficher indicateur + Générer la réponse de l'assistant via LLM
+    #Section de rendu dynamique du flux de l'assistant
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
-        message_placeholder.text("...") # Indicateur simple
+        message_placeholder.text("...") 
 
-        # Génération de la réponse de l'assistant en utilisant le prompt augmenté
-        # response_content = generer_reponse(messages_for_api)
+        #Initialisation du conteneur d'isolation pour le thread de requêtage SQL
+        safe_deps = {
+            "context_str": context_str,
+            "sql_queries": [],
+            "vector_store_manager": vector_store_manager
+        }
 
-        #On donne la question le context et la mémoire
-        #On récupère le text et l'et la mémoire mise à jour
         response_content, st.session_state.agent_history = generer_reponse(
             prompt, 
-            context_str, 
+            safe_deps, 
             st.session_state.agent_history
         )
 
-        # Affichage de la réponse complète
+        #Rapprochement des requêtes collectées de façon asynchrone avec le contexte Streamlit
+        st.session_state.sources_en_cours["sql"] = safe_deps["sql_queries"]
+        if safe_deps.get("faiss_called"):
+            st.session_state.sources_en_cours["faiss"] = True
+
         message_placeholder.write(response_content)
+        
+        #Injection immédiate du composant expander si des outils d'arrière-plan ont été sollicités
+        sources_utilisees = st.session_state.sources_en_cours
+        if sources_utilisees["faiss"] or len(sources_utilisees["sql"]) > 0:
+            with st.expander("🔍 Voir les sources et requêtes en arrière-plan"):
+                if sources_utilisees["faiss"]:
+                    st.info("📚 Recherche documentaire effectuée dans l'index FAISS (PDFs).")
+                for sql_query in sources_utilisees["sql"]:
+                    st.success("💾 Recherche dans la base de données (SQL) effectuée.")
+                    st.code(sql_query, language="sql")
 
-    # 7. Ajouter la réponse de l'assistant à l'historique (pour affichage UI)
-    st.session_state.messages.append({"role": "assistant", "content": response_content})
+    #Commisération immuable de la réponse et de ses métadonnées dans l'état de session historique
+    st.session_state.messages.append({
+        "role": "assistant", 
+        "content": response_content,
+        "sources": st.session_state.sources_en_cours.copy()
+    })
 
-# Petit pied de page optionnel
+#Rendu de l'identité visuelle de bas de page
 st.markdown("---")
 st.caption("Powered by Mistral AI & Faiss | Data-driven NBA Insights")
